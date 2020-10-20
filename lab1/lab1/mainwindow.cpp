@@ -169,6 +169,101 @@ QString MainWindow::DecodeMessage(const QString &encodedMessage) const {
     return result;
 }
 
+int** CreateSyndromMatrix(int rows, int columns) {
+
+    int **matrix = new int*[rows];
+    for (int i = 0; i < rows; i++) {
+        matrix[i] = new int[columns];
+    }
+    for (int i = 0; i < rows; i++) {
+        int number = i + 1;
+        for (int j = 0; j < columns; j++) {
+            matrix[i][j] = number % 2;
+            number /= 2;
+        }
+    }
+    return matrix;
+}
+
+void FreeMatrix(int** matrix, int rows) {
+
+    for (int i = 0; i < rows; i++) {
+        delete[]matrix[i];
+    }
+    delete[]matrix;
+}
+
+QString MainWindow::EncodeWithHammingCode(const QString &data) const {
+
+    int dataLength = data.size(), k = 0;
+    while (pow(2, k) - k < dataLength + 1) { k++; }
+
+    QString result;
+    for (int i = 0, j = 0; i < k + dataLength; i++) {
+
+        double powerOf2 = log2(i + 1), intPart;
+        if (modf(powerOf2, &intPart) == 0.0) {
+            result.append("0");
+        } else {
+            result.append(data.at(j));
+            j++;
+        }
+    }
+
+    int **matrix = CreateSyndromMatrix(result.size(), k);
+
+    for (int i = 0; i < k; i++) {
+        int unitCount = 0;
+        for (int j = 0; j < result.size(); j++) {
+            if (matrix[j][i] == 1 && result.at(j) == QChar('1')) {
+                unitCount++;
+            }
+        }
+        result.replace((int)pow(2, i) - 1, 1, QString::number(unitCount % 2));
+    }
+
+    FreeMatrix(matrix, result.size());
+    return result;
+}
+
+QString MainWindow::DecodeHammingCode(const QString &encodedData) const {
+
+    QString encodedDataCopy(encodedData);
+    int k = 0;
+    while (pow(2, k) < encodedData.size() + 1) { k++; }
+
+    int **matrix = CreateSyndromMatrix(encodedData.size(), k);
+    QString controlSums;
+
+    for (int i = 0; i < k; i++) {
+        int unitCount = 0;
+        for (int j = 0; j < encodedData.size(); j++) {
+            if (matrix[j][i] == 1 && encodedData.at(j) == QChar('1')) {
+                unitCount++;
+            }
+        }
+        controlSums.append(QString::number(unitCount % 2));
+    }
+
+    bool errorOccured = false;
+    for (int i = 0; i < k && !errorOccured; i++) {
+        if (controlSums.at(i) == QChar('1')) { errorOccured = true; }
+    }
+    if (errorOccured) {
+        std::reverse(controlSums.begin(), controlSums.end());
+        int errorPos = controlSums.toInt(nullptr, 2);
+        if (encodedData.at(errorPos - 1) == QChar('1')) {
+            encodedDataCopy.replace(errorPos - 1, 1, "0");
+        } else
+            encodedDataCopy.replace(errorPos - 1, 1, "1");
+    }
+
+    for (int i = k - 1; i >= 0; i--) { encodedDataCopy.remove(pow(2, i) - 1, 1); }
+
+    FreeMatrix(matrix, encodedData.size());
+    return encodedDataCopy;
+}
+
 void MainWindow::on_pushButton_clicked() {
 
     DWORD bytesWritten = 0;
@@ -178,14 +273,27 @@ void MainWindow::on_pushButton_clicked() {
 
     QString dataField = PerformBitStuffing(EncodeMessage(message));
     QString packet = HEADER + dataField;
+    QString HammingCode = EncodeWithHammingCode(packet);
 
-    if (WriteFile(commPort1, packet.toLocal8Bit().constData(),
-                  packet.size(), &bytesWritten, NULL)) {
+    int errorPos = 0;
+    if (ui->radioButton->isChecked()) {
+        errorPos = QRandomGenerator::global() -> bounded(HammingCode.size() - 1);
+        if (HammingCode.at(errorPos) == QChar('0')) {
+            HammingCode.replace(errorPos, 1, "1");
+        } else
+            HammingCode.replace(errorPos, 1, "0");
+    }
+
+    if (WriteFile(commPort1, HammingCode.toLocal8Bit().constData(),
+                  HammingCode.size(), &bytesWritten, NULL)) {
 
         ui->plainTextEdit->appendPlainText("Sended: " + message.left(bytesWritten));
-        packet.insert(HEADER.size() - 1, "   ");
-        ui->plainTextEdit->appendPlainText("Packet: " + packet);
-
+        packet.insert(HEADER.size(), "   ");
+        ui->plainTextEdit->appendPlainText("\nPacket: " + packet);
+        ui->plainTextEdit->appendPlainText("Hamming code: " + HammingCode);
+        if (ui->radioButton->isChecked()) {
+            ui->plainTextEdit->appendPlainText("-----Error inserted at position " + QString::number(errorPos) + "----");
+        }
     }
 
     char *readBuffer = new char[bytesWritten + 1];
@@ -195,7 +303,8 @@ void MainWindow::on_pushButton_clicked() {
 
         readBuffer[bytesRead] = '\0';
 
-        QString recievedPacket(readBuffer);
+        QString recievedHammingCode(readBuffer);
+        QString recievedPacket = DecodeHammingCode(recievedHammingCode);
         QString recievedMessage;
         if (recievedPacket.startsWith(HEADER)) {
 
